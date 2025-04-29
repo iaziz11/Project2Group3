@@ -1,0 +1,31 @@
+/* dashboard.css */
+body {
+    background-color: #e0e0e1;
+  }
+  
+  h1, h2, h3 {
+    color: #343a40;
+  }
+  
+  .card {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    transition: transform 0.2s ease-in-out;
+  }
+  
+  .card:hover {
+    transform: translateY(-5px);
+  }
+  
+  .list-group-item a {
+    text-decoration: none;
+    color: #007bff;
+  }
+  
+  .list-group-item a:hover {
+    text-decoration: underline;
+  }
+  
+  .text-center {
+    font-weight: 500;
+  }
+  
