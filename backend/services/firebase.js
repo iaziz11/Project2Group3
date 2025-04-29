@@ -24,7 +24,7 @@ const app = initializeApp(firebaseConfig);
 // Initialize Firestore database instance
 const db = getFirestore(app);
 
-// Checks if an image with the given URL already exists in our chache
+// Checks if an image with the given URL already exists in our cache
 async function checkImageInCache(imageUrl) {
   const imagesRef = collection(db, "cache");
   const q = query(imagesRef, where("imageUrl", "==", imageUrl));

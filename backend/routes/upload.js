@@ -4,6 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const router = express.Router();
 const fs = require("fs");
+const { Logging } = require("@google-cloud/logging");
 
 const VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
