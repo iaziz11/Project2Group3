@@ -2,73 +2,45 @@ const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const router = express.Router();
-const { v4: uuidv4 } = require("uuid");
-const { initializeApp } = require("firebase/app");
-const {
-  getFirestore,
-  collection,
-  query,
-  where,
-  getDocs,
-  addDoc,
-} = require("firebase/firestore");
+const { addImageInCache, checkImageInCache } = require("../services/firebase");
+const { Logging } = require("@google-cloud/logging");
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBJMlZhUCLbZkB0s__pLOkqaW9n1eqWGtg",
-  authDomain: "project-2-a6359.firebaseapp.com",
-  projectId: "project-2-a6359",
-  storageBucket: "project-2-a6359.firebasestorage.app",
-  messagingSenderId: "809495421889",
-  appId: "1:809495421889:web:928deb201d6375649f4540",
-  measurementId: "G-YENQ3GENCT",
-};
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
-// Pinterest App Credentials (use from .env or hardcode for now)
-const CLIENT_ID = process.env.PINTEREST_CLIENT_ID || "1508548";
-const CLIENT_SECRET =
-  process.env.PINTEREST_CLIENT_SECRET ||
-  "1e4910ff2b56f8021e4b28b392ac145975bbfc60";
+// Environment variables
+const CLIENT_ID = process.env.PINTEREST_CLIENT_ID;
+const CLIENT_SECRET = process.env.PINTEREST_CLIENT_SECRET;
 const REDIRECT_URI = process.env.PINTEREST_REDIRECT_URI;
 const VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`;
 
+// Set up Google Cloud Logging
+const logging = new Logging();
+const geminiLog = logging.log("gemini-api-requests");
+const spotifyLog = logging.log("spotify-api-requests");
+const googleVisionLog = logging.log("gvision-api-requests");
+
+async function logRequest(requestData, log) {
+  const metadata = { resource: { type: "global" } };
+  const entry = log.entry(metadata, requestData);
+  await log.write(entry);
+}
+
+// Google analytics API
+function trackEvent(eventName) {
+  axios.post("https://www.google-analytics.com/mp/collect", {
+    client_id: "G-FCPFRLKXJR",
+    events: [{ name: eventName }],
+  });
+}
+
 // State token for CSRF protection
 let stateToken = "";
 
-async function checkImageInCache(imageUrl) {
-  const imagesRef = collection(db, "cache");
-  const q = query(imagesRef, where("imageUrl", "==", imageUrl));
-  const querySnapshot = await getDocs(q);
-
-  if (!querySnapshot.empty) {
-    // Image already exists
-    const doc = querySnapshot.docs[0];
-    console.log("Image found:", doc.data());
-    return doc.data();
-  } else {
-    return null;
-  }
-}
-
-async function addImageInCache(imageUrl, data) {
-  const imagesRef = collection(db, "cache");
-
-  await addDoc(imagesRef, {
-    imageUrl: imageUrl,
-    imageData: data,
-  });
-  console.log("Added new image to cache");
-}
-
+// Spotify access token management
 let spotifyAccessToken = "";
 let tokenExpiresAt = 0;
 
-// Function to get new access token
+// Function to get new Spotify access token
 const getSpotifyAccessToken = async () => {
   if (spotifyAccessToken && Date.now() < tokenExpiresAt) {
     return spotifyAccessToken; // return cached token
@@ -91,12 +63,13 @@ const getSpotifyAccessToken = async () => {
     }
   );
 
+  // Save token and expiration time
   spotifyAccessToken = response.data.access_token;
   tokenExpiresAt = Date.now() + response.data.expires_in * 1000; // cache expiration time
   return spotifyAccessToken;
 };
 
-// Search Route
+// Spotify search route
 router.get("/spotify/search", async (req, res) => {
   const { query } = req.query;
   if (!query) {
@@ -158,6 +131,7 @@ router.get("/pinterest/callback", async (req, res) => {
 
   console.log(`Received Authorization Code: ${code}`);
 
+  // Prepare request data
   const postData = new URLSearchParams();
   postData.append("grant_type", "authorization_code");
   postData.append("redirect_uri", REDIRECT_URI);
@@ -247,6 +221,7 @@ router.get("/pinterest/callback", async (req, res) => {
   }
 });
 
+// Fetch Pinterest pins (requires access token)
 router.get("/pinterest/pins", async (req, res) => {
   const accessToken = req.query.accessToken; // Get token from frontend
 
@@ -278,8 +253,9 @@ router.get("/pinterest/pins", async (req, res) => {
   }
 });
 
+// Analyze a Pinterest Pin's image: detect labels, emotion, recommend music and create a story
 router.post("/pinterest/analyze-pin", async (req, res) => {
-  const { imageUrl, userId } = req.body;
+  const { imageUrl } = req.body;
 
   if (!imageUrl) {
     return res.status(400).json({ message: "Image URL is required" });
@@ -296,7 +272,7 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
     });
     return;
   }
-
+  // Analyze image using Google Vision API
   try {
     const visionResponse = await axios.post(
       `https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,
@@ -312,6 +288,8 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
         ],
       }
     );
+    logRequest({ message: "Google Vision API called" }, googleVisionLog);
+    trackEvent("Google Vision API Call");
 
     const visionData = visionResponse.data;
     const labels =
@@ -320,6 +298,7 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
       ) || [];
     const faceData = visionData.responses[0].faceAnnotations?.[0];
 
+    // Detect dominant emotion
     let dominantEmotion = "neutral";
     if (faceData) {
       const emotions = [
@@ -337,6 +316,7 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
           : "neutral";
     }
 
+    // Ask Gemini AI for music recommendations based on labels and emotion
     const geminiPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
       ", "
     )}. Recommend songs matching this mood as **Song - Artist**.`;
@@ -349,9 +329,13 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
       ],
     });
 
+    logRequest({ message: "Gemini API called", geminiPrompt }, geminiLog);
+    trackEvent("Gemini API Call");
+
     const recommendationsText =
       geminiResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
+    // Extract songs from Gemini response
     const regex = /\*\*\s*(.*?)\s*-\s*(.*?)\s*\*\*/g;
     let match;
     const songs = [];
@@ -359,6 +343,7 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
       songs.push({ song: match[1].trim(), artist: match[2].trim() });
     }
 
+    // Search songs on Spotify
     const spotifyResults = [];
     const spotifyToken = await getSpotifyAccessToken();
 
@@ -384,8 +369,10 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
         console.warn(`Spotify search failed for ${song} - ${artist}`);
       }
     }
+    logRequest({ message: "Spotify API called" }, spotifyLog);
+    trackEvent("Spotify API Call");
 
-    // Generate Story
+    // Generate a short story using Gemini
     const storyPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
       ", "
     )}. Write a short story that reflects this mood and setting.`;
@@ -397,15 +384,21 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
       ],
     });
 
+    logRequest({ message: "Gemini API called", storyPrompt }, geminiLog);
+    trackEvent("Gemini API Call");
+
     const storyText =
       storyResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
+    // Save results in cache
     addImageInCache(imageUrl, {
       labels,
       dominantEmotion,
       spotifyResults,
       storyText,
     });
+
+    // Respond to frontend
     res.json({
       labels,
       dominantEmotion,
@@ -424,7 +417,7 @@ router.post("/pinterest/analyze-pin", async (req, res) => {
   }
 });
 
-// Helper: Convert likelihood string to score
+// Convert likelihood string to score
 function likelihoodScore(likelihood) {
   const levels = {
     VERY_UNLIKELY: 0,

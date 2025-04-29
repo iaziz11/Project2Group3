@@ -1,8 +1,17 @@
 import React from "react";
 import "./login.css";
+import ReactGA from "react-ga4";
 
+ReactGA.initialize("G-FCPFRLKXJR");
+ReactGA.send("pageview"); // This sends a pageview event
+// Login button
 const LoginButton = () => {
   const handleLogin = () => {
+    ReactGA.event({
+      category: "API Request",
+      action: "Called Pinterest OAuth API",
+      label: "Pinterest",
+    });
     window.location.href = "/auth/pinterest";
   };
 

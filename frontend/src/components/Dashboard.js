@@ -10,6 +10,7 @@ const Dashboard = () => {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
 
+  // Fetch user's pins
   useEffect(() => {
     const fetchPins = async () => {
       const urlParams = new URLSearchParams(window.location.search);
@@ -40,6 +41,7 @@ const Dashboard = () => {
     fetchPins();
   }, []);
 
+  // Analyze the pin that the user chooses
   const handleAnalyzePin = async (imageUrl) => {
     setAnalyzing(true);
     setAnalysisResult(null);
@@ -62,6 +64,7 @@ const Dashboard = () => {
     }
   };
 
+  // Analyze the file that the user uploads
   const handleAnalyzeFileUpload = async (image) => {
     setAnalyzing(true);
     setAnalysisResult(null);
@@ -89,12 +92,14 @@ const Dashboard = () => {
   };
 
   return (
+    // Pins
     <div className="container my-4">
       <h1 className="text-center mb-4">Your Pinterest Pins</h1>
       {error && <div className="alert alert-danger">{error}</div>}
       {loading ? (
         <div className="text-center">Loading your pins...</div>
       ) : (
+        // When finished loading
         <div className="row">
           {pins.map((pin) => {
             const imageUrl =
@@ -102,6 +107,7 @@ const Dashboard = () => {
               pin.media?.images?.originals?.url ||
               pin.images?.original?.url ||
               "";
+            // Return each pin as a card
             return (
               <div key={pin.id} className="col-md-4 mb-4">
                 <div className="card h-100">
@@ -129,6 +135,7 @@ const Dashboard = () => {
         </div>
       )}
 
+      {/* User upload section */}
       <div className="text-center">
         <p>--- or ---</p>
         <input
@@ -139,9 +146,8 @@ const Dashboard = () => {
         />
       </div>
 
-      {analyzing && (
-        <div className="text-center mt-4">Analyzing selected pin...</div>
-      )}
+      {analyzing && <div className="text-center mt-4">Analyzing photo...</div>}
+      {/* Analyzing pin or photo */}
       {analysisResult && (
         <div className="mt-5">
           <h2>Mood Analysis Result</h2>
@@ -167,7 +173,7 @@ const Dashboard = () => {
               </li>
             ))}
           </ul>
-
+          {/* Story */}
           <h3>Story</h3>
           <div className="list-group">
             <div className="list-group-item">{analysisResult.story}</div>

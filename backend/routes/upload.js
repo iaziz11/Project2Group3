@@ -4,15 +4,22 @@ const multer = require("multer");
 const path = require("path");
 const router = express.Router();
 const fs = require("fs");
-const vision = require("@google-cloud/vision");
-
-const client = new vision.ImageAnnotatorClient({
-  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-});
 
 const VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`;
+
+// Set up Google Cloud Logging
+const logging = new Logging();
+const geminiLog = logging.log("gemini-api-requests");
+const spotifyLog = logging.log("spotify-api-requests");
+const googleVisionLog = logging.log("gvision-api-requests");
+
+async function logRequest(requestData, log) {
+  const metadata = { resource: { type: "global" } };
+  const entry = log.entry(metadata, requestData);
+  await log.write(entry);
+}
 
 let spotifyAccessToken = "";
 let tokenExpiresAt = 0;
@@ -45,164 +52,157 @@ const getSpotifyAccessToken = async () => {
   return spotifyAccessToken;
 };
 
+// To handle user uploads
 const upload = multer({ dest: "uploads/" });
-router.post(
-  "/userfile",
-  upload.single("image"),
-  async (req, res) => {
-    const filePath = path.join(__dirname, "..", req.file.path);
-    const fileBuffer = fs.readFileSync(filePath);
-    const base64Image = fileBuffer.toString("base64");
-    let labels;
-    let dominantEmotion = "neutral";
-    const songs = [];
-    const spotifyResults = [];
-    try {
-      console.log("sending google vision");
-      const visionResponse = await axios.post(
-        `https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,
-        {
-          requests: [
-            {
-              image: { content: base64Image },
-              features: [
-                { type: "LABEL_DETECTION", maxResults: 5 },
-                { type: "FACE_DETECTION", maxResults: 1 },
-              ],
-            },
-          ],
-        }
+router.post("/userfile", upload.single("image"), async (req, res) => {
+  const filePath = path.join(__dirname, "..", req.file.path);
+  const fileBuffer = fs.readFileSync(filePath);
+  const base64Image = fileBuffer.toString("base64");
+  let labels;
+  let dominantEmotion = "neutral";
+  const songs = [];
+  const spotifyResults = [];
+
+  // Send image to Google Vision API
+  try {
+    const visionResponse = await axios.post(
+      `https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,
+      {
+        requests: [
+          {
+            image: { content: base64Image },
+            features: [
+              { type: "LABEL_DETECTION", maxResults: 5 },
+              { type: "FACE_DETECTION", maxResults: 1 },
+            ],
+          },
+        ],
+      }
+    );
+
+    logRequest({ message: "Google Vision API called" }, googleVisionLog);
+
+    const visionData = visionResponse.data;
+    labels =
+      visionData.responses[0].labelAnnotations?.map(
+        (label) => label.description
+      ) || [];
+    const faceData = visionData.responses[0].faceAnnotations?.[0];
+
+    if (faceData) {
+      const emotions = [
+        { emotion: "joy", likelihood: faceData.joyLikelihood },
+        { emotion: "sorrow", likelihood: faceData.sorrowLikelihood },
+        { emotion: "anger", likelihood: faceData.angerLikelihood },
+        { emotion: "surprise", likelihood: faceData.surpriseLikelihood },
+      ];
+      emotions.sort(
+        (a, b) => likelihoodScore(b.likelihood) - likelihoodScore(a.likelihood)
       );
-
-      const visionData = visionResponse.data;
-      labels =
-        visionData.responses[0].labelAnnotations?.map(
-          (label) => label.description
-        ) || [];
-      const faceData = visionData.responses[0].faceAnnotations?.[0];
-
-      if (faceData) {
-        const emotions = [
-          { emotion: "joy", likelihood: faceData.joyLikelihood },
-          { emotion: "sorrow", likelihood: faceData.sorrowLikelihood },
-          { emotion: "anger", likelihood: faceData.angerLikelihood },
-          { emotion: "surprise", likelihood: faceData.surpriseLikelihood },
-        ];
-        emotions.sort(
-          (a, b) =>
-            likelihoodScore(b.likelihood) - likelihoodScore(a.likelihood)
-        );
-        dominantEmotion =
-          emotions[0].likelihood !== "VERY_UNLIKELY"
-            ? emotions[0].emotion
-            : "neutral";
-      }
-    } catch (e) {
-      console.log("Something went wrong with google vision");
-      console.log(e.message);
+      dominantEmotion =
+        emotions[0].likelihood !== "VERY_UNLIKELY"
+          ? emotions[0].emotion
+          : "neutral";
     }
-
-    console.log("recieved google vision");
-    console.log("sending gemini");
-
-    try {
-      const geminiPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
-        ", "
-      )}. Recommend songs matching this mood as **Song - Artist**.`;
-
-      const geminiResponse = await axios.post(GEMINI_API_URL, {
-        contents: [
-          {
-            parts: [{ text: geminiPrompt }],
-          },
-        ],
-      });
-
-      const recommendationsText =
-        geminiResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-      const regex = /\*\*\s*(.*?)\s*-\s*(.*?)\s*\*\*/g;
-      let match;
-      while ((match = regex.exec(recommendationsText)) !== null) {
-        songs.push({ song: match[1].trim(), artist: match[2].trim() });
-      }
-      console.log("recieved gemini");
-      console.log("sending spotify");
-    } catch (e) {
-      console.log("Something went wrong with gemini");
-      console.log(e.message);
-    }
-    try {
-      const spotifyToken = await getSpotifyAccessToken();
-
-      for (const { song, artist } of songs) {
-        try {
-          const searchQuery = `${song} ${artist}`;
-          const spotifySearchResponse = await axios.get(
-            "https://api.spotify.com/v1/search",
-            {
-              headers: { Authorization: `Bearer ${spotifyToken}` },
-              params: { q: searchQuery, type: "track", limit: 1 },
-            }
-          );
-          const track = spotifySearchResponse.data.tracks.items[0];
-          if (track) {
-            spotifyResults.push({
-              song,
-              artist,
-              spotifyUrl: track.external_urls.spotify,
-            });
-          }
-        } catch (err) {
-          console.warn(`Spotify search failed for ${song} - ${artist}`);
-        }
-      }
-    } catch (e) {
-      console.log("Something went wrong with spotify");
-      console.log(e.message);
-    }
-    console.log("recieved spotify");
-    console.log(spotifyResults);
-    try {
-      // Generate Story
-      const storyPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
-        ", "
-      )}. Write a short story that reflects this mood and setting.`;
-      const storyResponse = await axios.post(GEMINI_API_URL, {
-        contents: [
-          {
-            parts: [{ text: storyPrompt }],
-          },
-        ],
-      });
-
-      const storyText =
-        storyResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-      res.json({
-        labels,
-        dominantEmotion,
-        musicRecommendations: spotifyResults,
-        story: storyText,
-      });
-    } catch (e) {
-      console.log("Something went wrong with gemini (2)");
-      console.log(e.message);
-    }
+  } catch (e) {
+    console.log("Something went wrong with google vision");
+    console.log(e.message);
   }
-  // catch (error) {
-  //   console.error(
-  //     "Error analyzing image:",
-  //     error.response?.data || error.message
-  //   );
-  //   console.log(error.message);
-  //   res.status(500).json({
-  //     message: "Failed to analyze image",
-  //     error: error.response?.data || error.message,
-  //   });
-  // }
-  //}
-);
+
+  // Send photo data to Gemini
+
+  try {
+    const geminiPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
+      ", "
+    )}. Recommend songs matching this mood as **Song - Artist**.`;
+
+    const geminiResponse = await axios.post(GEMINI_API_URL, {
+      contents: [
+        {
+          parts: [{ text: geminiPrompt }],
+        },
+      ],
+    });
+
+    logRequest({ message: "Gemini API called", geminiPrompt }, geminiLog);
+
+    const recommendationsText =
+      geminiResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    const regex = /\*\*\s*(.*?)\s*-\s*(.*?)\s*\*\*/g;
+    let match;
+    while ((match = regex.exec(recommendationsText)) !== null) {
+      songs.push({ song: match[1].trim(), artist: match[2].trim() });
+    }
+    console.log("recieved gemini");
+    console.log("sending spotify");
+  } catch (e) {
+    console.log("Something went wrong with gemini");
+    console.log(e.message);
+  }
+
+  // Search Spotify
+  try {
+    const spotifyToken = await getSpotifyAccessToken();
+
+    for (const { song, artist } of songs) {
+      try {
+        const searchQuery = `${song} ${artist}`;
+        const spotifySearchResponse = await axios.get(
+          "https://api.spotify.com/v1/search",
+          {
+            headers: { Authorization: `Bearer ${spotifyToken}` },
+            params: { q: searchQuery, type: "track", limit: 1 },
+          }
+        );
+        const track = spotifySearchResponse.data.tracks.items[0];
+        if (track) {
+          spotifyResults.push({
+            song,
+            artist,
+            spotifyUrl: track.external_urls.spotify,
+          });
+        }
+      } catch (err) {
+        console.warn(`Spotify search failed for ${song} - ${artist}`);
+      }
+    }
+    logRequest({ message: "Spotify API called" }, spotifyLog);
+  } catch (e) {
+    console.log("Something went wrong with spotify");
+    console.log(e.message);
+  }
+
+  // Generate Story with Gemini
+  try {
+    const storyPrompt = `Detected emotion: ${dominantEmotion}. Context labels: ${labels.join(
+      ", "
+    )}. Write a short story that reflects this mood and setting.`;
+    const storyResponse = await axios.post(GEMINI_API_URL, {
+      contents: [
+        {
+          parts: [{ text: storyPrompt }],
+        },
+      ],
+    });
+
+    logRequest({ message: "Gemini API called", storyPrompt }, geminiLog);
+
+    const storyText =
+      storyResponse.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    // Respond to frontend
+    res.json({
+      labels,
+      dominantEmotion,
+      musicRecommendations: spotifyResults,
+      story: storyText,
+    });
+  } catch (e) {
+    console.log("Something went wrong with gemini (2)");
+    console.log(e.message);
+  }
+});
 
 function likelihoodScore(likelihood) {
   const levels = {
